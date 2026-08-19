@@ -130,7 +130,7 @@ object BoostController {
             // taken by a higher-priority client such as an OEM equalizer, after which our writes
             // are accepted and then quietly ignored. Rebuilding is the only reliable repair.
             if (!BoostEngine.attached || !BoostEngine.healthy()) {
-                BoostEngine.attach(BoostState.gainDb.value)
+                BoostEngine.attach(BoostState.gainDb.value, BoostState.yieldLimiter.value)
             } else {
                 BoostEngine.setGain(BoostState.gainDb.value)
             }
@@ -167,10 +167,26 @@ object BoostController {
         return byConfig || manager.isMusicActive
     }
 
+    /**
+     * Whether the limiter is claimed is decided at attach time, so changing it has to rebuild the
+     * effect rather than adjust a parameter.
+     */
+    fun setYieldLimiter(context: Context, shouldYield: Boolean) {
+        BoostState.ensureInit(context)
+        BoostState.setYieldLimiter(shouldYield)
+        handler?.post {
+            if (BoostEngine.attached) {
+                BoostEngine.attach(BoostState.gainDb.value, shouldYield)
+                publish()
+            }
+        }
+    }
+
     private fun publish() {
         BoostState.publishStatus(
             attached = BoostEngine.attached,
             host = HostManager.activeHost(),
+            limiter = BoostEngine.limiterState,
             error = BoostEngine.lastError
         )
     }

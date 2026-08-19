@@ -21,6 +21,17 @@
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
 
+    <!--
+      Package visibility for the system-wide equalizers Overdrive competes with for the
+      DynamicsProcessing module on session 0. Without this, getPackageInfo reports them as absent
+      on Android 11 and newer whether they are installed or not. Nothing else is queried.
+    -->
+    <queries>
+        <package android:name="com.pittvandewitt.wavelet" />
+        <package android:name="james.dsp" />
+        <package android:name="org.lineageos.audiofx" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_overdrive"

@@ -23,6 +23,7 @@ object BoostState {
     private const val KEY_GAIN = "gain_db"
     private const val KEY_ONLY_WHILE_PLAYING = "only_while_playing"
     private const val KEY_SAFE_VOLUME = "manage_safe_volume"
+    private const val KEY_YIELD_LIMITER = "yield_limiter"
 
     private var prefs: SharedPreferences? = null
 
@@ -30,12 +31,14 @@ object BoostState {
     private val _gainDb = MutableStateFlow(DEFAULT_GAIN_DB)
     private val _onlyWhilePlaying = MutableStateFlow(true)
     private val _manageSafeVolume = MutableStateFlow(false)
+    private val _yieldLimiter = MutableStateFlow(false)
     private val _status = MutableStateFlow(Status())
 
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
     val gainDb: StateFlow<Float> = _gainDb.asStateFlow()
     val onlyWhilePlaying: StateFlow<Boolean> = _onlyWhilePlaying.asStateFlow()
     val manageSafeVolume: StateFlow<Boolean> = _manageSafeVolume.asStateFlow()
+    val yieldLimiter: StateFlow<Boolean> = _yieldLimiter.asStateFlow()
     val status: StateFlow<Status> = _status.asStateFlow()
 
     /**
@@ -45,6 +48,7 @@ object BoostState {
     data class Status(
         val attached: Boolean = false,
         val host: HostManager.Host = HostManager.Host.NONE,
+        val limiter: BoostEngine.LimiterState = BoostEngine.LimiterState.NONE,
         val error: String? = null
     )
 
@@ -57,6 +61,14 @@ object BoostState {
         _gainDb.value = p.getFloat(KEY_GAIN, DEFAULT_GAIN_DB)
         _onlyWhilePlaying.value = p.getBoolean(KEY_ONLY_WHILE_PLAYING, true)
         _manageSafeVolume.value = p.getBoolean(KEY_SAFE_VOLUME, false)
+
+        // Default the limiter to yielded when a system-wide equalizer is already installed, since
+        // fighting it for the same effect module breaks its EQ rather than gaining anything here.
+        // Detection only picks the initial value; once the user has an opinion it is theirs.
+        _yieldLimiter.value = p.getBoolean(
+            KEY_YIELD_LIMITER,
+            Coexistence.installedEqualizer(context) != null
+        )
     }
 
     fun setEnabled(value: Boolean) {
@@ -80,7 +92,17 @@ object BoostState {
         prefs?.edit()?.putBoolean(KEY_SAFE_VOLUME, value)?.apply()
     }
 
-    internal fun publishStatus(attached: Boolean, host: HostManager.Host, error: String?) {
-        _status.value = Status(attached, host, error)
+    fun setYieldLimiter(value: Boolean) {
+        _yieldLimiter.value = value
+        prefs?.edit()?.putBoolean(KEY_YIELD_LIMITER, value)?.apply()
+    }
+
+    internal fun publishStatus(
+        attached: Boolean,
+        host: HostManager.Host,
+        limiter: BoostEngine.LimiterState,
+        error: String?
+    ) {
+        _status.value = Status(attached, host, limiter, error)
     }
 }

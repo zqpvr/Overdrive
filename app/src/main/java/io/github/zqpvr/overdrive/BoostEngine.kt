@@ -26,8 +26,17 @@ object BoostEngine {
     /** AudioFlinger's global output mix. */
     private const val GLOBAL_SESSION = 0
 
-    /** Effect priority. Higher wins if two clients fight over the same session. */
-    private const val PRIORITY = 0
+    /**
+     * Priority requested for the limiter. Higher wins when two clients want the same effect type
+     * in the same chain, and this is deliberately negative so Overdrive always loses that contest.
+     *
+     * The contest is real. AudioFlinger reuses one effect module per UUID within a chain rather
+     * than instantiating a second one, so a system-wide equalizer running on session 0 is asking
+     * for the same DynamicsProcessing instance Overdrive wants. Wavelet in legacy mode is the
+     * common case. Yielding costs a limiter that LoudnessEnhancer partly duplicates anyway;
+     * winning would silently break the other application's EQ, which is worse.
+     */
+    private const val LIMITER_PRIORITY = -1
 
     /**
      * Ceiling the limiter holds the mix under, in dBFS. Slightly below full scale, because the
@@ -50,14 +59,39 @@ object BoostEngine {
     var lastError: String? = null
         private set
 
+    /** What became of the limiter on the last attach, reported in the UI. */
+    @Volatile
+    var limiterState: LimiterState = LimiterState.NONE
+        private set
+
+    enum class LimiterState {
+        /** Nothing is attached. */
+        NONE,
+
+        /** Overdrive owns the DynamicsProcessing instance and is limiting. */
+        ACTIVE,
+
+        /** Skipped on purpose so another application can own it. */
+        YIELDED_BY_CHOICE,
+
+        /** Another client already held control, so the handle was released again. */
+        YIELDED_TO_OTHER,
+
+        /** Creation failed outright, which happens where the HAL ships no effect bundle. */
+        UNAVAILABLE
+    }
+
     /**
-     * Attaches both effects at [gainDb], replacing anything already attached.
+     * Attaches the gain stage at [gainDb], replacing anything already attached, and adds the
+     * limiter unless [yieldLimiter] is set or another client already owns it.
      *
-     * Returns false and leaves nothing attached if either effect could not be created, which is
-     * what happens on devices whose vendor audio HAL ships no software effect bundle.
+     * Returns false and leaves nothing attached only if the gain stage itself could not be
+     * created. A missing limiter is not fatal, because LoudnessEnhancer carries an adaptive
+     * dynamic range compressor of its own that compresses anything amplified past full scale.
+     * That is weaker than a real brickwall limiter but it is not nothing.
      */
     @Synchronized
-    fun attach(gainDb: Float): Boolean {
+    fun attach(gainDb: Float, yieldLimiter: Boolean): Boolean {
         detach()
 
         val enhancerOk = runCatching {
@@ -73,10 +107,23 @@ object BoostEngine {
             return false
         }
 
-        // The limiter is best-effort. If DynamicsProcessing is unavailable the boost still
-        // works, it just clips earlier, so a failure here is logged rather than fatal.
-        runCatching {
-            val config = DynamicsProcessing.Config.Builder(
+        limiterState = if (yieldLimiter) LimiterState.YIELDED_BY_CHOICE else attachLimiter()
+
+        lastError = null
+        attached = true
+        Log.i(TAG, "attached at ${gainDb}dB, limiter $limiterState")
+        return true
+    }
+
+    /**
+     * Creating the effect succeeds even when another client already controls the underlying
+     * module, so control has to be checked rather than assumed. Without it every parameter write
+     * is accepted and then discarded, which looks identical to working from the outside. The
+     * handle is dropped in that case instead of being kept as a decoration.
+     */
+    private fun attachLimiter(): LimiterState {
+        val config = runCatching {
+            DynamicsProcessing.Config.Builder(
                 DynamicsProcessing.VARIANT_FAVOR_TIME_RESOLUTION,
                 CHANNEL_COUNT,
                 /* preEqInUse = */ false, /* preEqBandCount = */ 0,
@@ -84,20 +131,29 @@ object BoostEngine {
                 /* postEqInUse = */ false, /* postEqBandCount = */ 0,
                 /* limiterInUse = */ true
             ).build()
+        }.getOrNull() ?: return LimiterState.UNAVAILABLE
 
-            DynamicsProcessing(PRIORITY, GLOBAL_SESSION, config).also { effect ->
-                for (channel in 0 until CHANNEL_COUNT) {
-                    effect.setLimiterByChannelIndex(channel, buildLimiter())
-                }
-                effect.enabled = true
-                dynamics = effect
+        val effect = runCatching { DynamicsProcessing(LIMITER_PRIORITY, GLOBAL_SESSION, config) }
+            .onFailure { Log.w(TAG, "limiter unavailable", it) }
+            .getOrNull() ?: return LimiterState.UNAVAILABLE
+
+        if (!runCatching { effect.hasControl() }.getOrDefault(false)) {
+            Log.i(TAG, "limiter already owned by another client, releasing")
+            runCatching { effect.release() }
+            return LimiterState.YIELDED_TO_OTHER
+        }
+
+        return runCatching {
+            for (channel in 0 until CHANNEL_COUNT) {
+                effect.setLimiterByChannelIndex(channel, buildLimiter())
             }
-        }.onFailure { Log.w(TAG, "limiter unavailable, boost will clip earlier", it) }
-
-        lastError = null
-        attached = true
-        Log.i(TAG, "attached at ${gainDb}dB (limiter=${dynamics != null})")
-        return true
+            effect.enabled = true
+            dynamics = effect
+            LimiterState.ACTIVE
+        }.onFailure {
+            Log.w(TAG, "limiter configuration rejected", it)
+            runCatching { effect.release() }
+        }.getOrDefault(LimiterState.YIELDED_TO_OTHER)
     }
 
     /**
@@ -118,6 +174,7 @@ object BoostEngine {
         enhancer = null
         dynamics = null
         attached = false
+        limiterState = LimiterState.NONE
     }
 
     /**

@@ -101,6 +101,37 @@ runs on a dedicated `HandlerThread` because creating an `AudioEffect` is a block
 round-trip into audioserver and the callbacks that trigger it arrive at times the application does
 not control.
 
+## Running alongside a system-wide equalizer
+
+AudioFlinger keeps one effect module per UUID within an effect chain rather than instantiating a
+second one, and hands control to whichever client holds the highest priority. Every other client
+can still write parameters, but the writes are accepted and then discarded, which is
+indistinguishable from working. Overdrive's limiter is a `DynamicsProcessing` instance, and so is
+most of what Wavelet, JamesDSP, and AudioFX do, which puts them all in contention for the same
+module whenever they sit on session 0.
+
+Wavelet's default mode attaches to the media player's own session ID rather than session 0, so the
+chains are separate and nothing is contested. The player session runs first and the global mix
+second, meaning the EQ curve is applied and Overdrive's gain then operates on the result, which is
+the correct ordering. Wavelet's legacy mode moves to session 0 and does collide.
+
+Overdrive resolves this by losing on purpose. The limiter is requested at priority -1 so control
+always goes to the other application, and after the effect is created `hasControl()` is checked
+before any parameter is written. If control was not granted, the handle is released rather than
+kept as decoration, and the UI reports which of the two happened. Where a known system-wide
+equalizer is installed, detected through a narrow manifest queries declaration listing those three
+packages and nothing else, the limiter defaults to being skipped entirely on first run. That is a
+starting value only and can be overridden.
+
+Yielding is not the same as running unprotected. AOSP's `LoudnessEnhancer` is not a plain gain
+stage. It wraps an adaptive dynamic range compressor from
+`frameworks/av/media/libeffects/loudness` that compresses anything amplified beyond the platform
+sample range, which is weaker than a brickwall limiter at -0.5 dBFS but is not nothing. The real
+hazard when stacking is headroom rather than protection. AutoEq curves apply positive gain on
+individual bands and the equalizer reserves headroom with a negative preamp to compensate, so
+adding another +10 dB on top spends exactly the margin that was just set aside. Use less gain than
+would be appropriate with Overdrive alone.
+
 ## Lifting the headphone limit
 
 Grant the permission once over adb:

@@ -35,6 +35,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -93,6 +94,7 @@ private fun Screen(modifier: Modifier = Modifier) {
     val gain by BoostState.gainDb.collectAsState()
     val onlyWhilePlaying by BoostState.onlyWhilePlaying.collectAsState()
     val manageSafeVolume by BoostState.manageSafeVolume.collectAsState()
+    val yieldLimiter by BoostState.yieldLimiter.collectAsState()
     val status by BoostState.status.collectAsState()
 
     Column(
@@ -128,9 +130,9 @@ private fun Screen(modifier: Modifier = Modifier) {
                 steps = 39
             )
             Hint(
-                "A limiter sits after the gain, so nothing clips outright. Past roughly +10 dB " +
-                    "the limiter is working most of the time and the mix will start to sound " +
-                    "flat and loud rather than louder."
+                "Past roughly +10 dB whatever is catching peaks is working most of the time and " +
+                    "the mix starts to sound flat and loud rather than louder. See the limiter " +
+                    "section below for what is actually catching them right now."
             )
 
             Spacer(Modifier.height(8.dp))
@@ -145,6 +147,40 @@ private fun Screen(modifier: Modifier = Modifier) {
                     BoostController.sync()
                 }
             )
+        }
+
+        // ---- limiter and coexistence ----
+        Section {
+            Text("Limiter", style = MaterialTheme.typography.titleMedium)
+
+            val equalizer = remember { Coexistence.installedEqualizer(context) }
+            val equalizerName = equalizer?.let { Coexistence.displayName(it) }
+
+            Hint(limiterLine(status.limiter, equalizerName))
+
+            Spacer(Modifier.height(8.dp))
+
+            SwitchRow(
+                title = "Leave the limiter to ${equalizerName ?: "another app"}",
+                subtitle = "Android keeps one DynamicsProcessing instance per audio session and " +
+                    "gives control to a single client, so claiming it stops a system-wide " +
+                    "equalizer on session 0 from working. Overdrive already asks for the lowest " +
+                    "priority; this skips the attempt entirely.",
+                checked = yieldLimiter,
+                onChange = { BoostController.setYieldLimiter(context, it) }
+            )
+
+            if (equalizerName != null) {
+                Spacer(Modifier.height(8.dp))
+                Hint(
+                    "$equalizerName was detected, so this defaulted on. Its per-session mode does " +
+                        "not collide and does not need this; legacy mode does. Note that " +
+                        "LoudnessEnhancer still applies its own dynamic range compression to " +
+                        "anything pushed past full scale, so yielding is not the same as running " +
+                        "with no protection at all. Keep the gain lower than you would alone, " +
+                        "because an EQ curve with positive bands has already spent some headroom."
+                )
+            }
         }
 
         // ---- host ----
@@ -306,6 +342,17 @@ private fun Mono(text: String) {
         fontSize = 12.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
+}
+
+private fun limiterLine(state: BoostEngine.LimiterState, equalizer: String?): String = when (state) {
+    BoostEngine.LimiterState.NONE -> "Not attached"
+    BoostEngine.LimiterState.ACTIVE -> "Brickwall limiter active at -0.5 dBFS"
+    BoostEngine.LimiterState.YIELDED_BY_CHOICE ->
+        "Skipped by choice. LoudnessEnhancer compression only."
+    BoostEngine.LimiterState.YIELDED_TO_OTHER ->
+        "Claimed by ${equalizer ?: "another app"}. LoudnessEnhancer compression only."
+    BoostEngine.LimiterState.UNAVAILABLE ->
+        "Unavailable on this device. LoudnessEnhancer compression only."
 }
 
 private fun statusLine(status: BoostState.Status, enabled: Boolean): String = when {
