@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Overdrive</string>
+    <string name="tile_label">Overdrive</string>
+    <string name="a11y_label">Overdrive keep-alive</string>
+    <string name="a11y_description">Overdrive does not read your screen and receives no accessibility events. Enabling this only gives Overdrive a process the system keeps alive, so the volume boost can stay applied without a permanent notification. Leave it off to use the notification-based mode instead.</string>
+    <string name="notif_channel">Boost active</string>
+</resources>
